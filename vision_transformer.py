@@ -21,44 +21,48 @@ class Projection_Layer(nn.Module):
         return x
 
 class Attention(nn.Module):
-    def __init__(self, embed_size):
+    def __init__(self,num_heads, embed_size):
         super(Attention, self).__init__()
-
-        self.Q_matrix = nn.Linear(embed_size,embed_size)
-        self.K_matrix = nn.Linear(embed_size,embed_size)
-        self.V_matrix = nn.Linear(embed_size,embed_size)
-        self.temperature = embed_size**0.5
+        
+        eff_embed_size = embed_size//num_heads
+        self.num_heads = num_heads
+        self.Q_matrix = nn.Linear(eff_embed_size,eff_embed_size)
+        self.K_matrix = nn.Linear(eff_embed_size,eff_embed_size)
+        self.V_matrix = nn.Linear(eff_embed_size,eff_embed_size)
+        self.temperature = eff_embed_size**0.5
 
     def forward(self, x):
+        bs,n_1,embed_dim = x.shape
+        x = x.view(bs,self.num_heads,n_1,embed_dim//self.num_heads)  ## B, head, 256, 192//head
         q = self.Q_matrix(x)
         k = self.K_matrix(x)
         v = self.V_matrix(x)
 
         attention = nn.Softmax(dim=-1)(torch.matmul(q,k.transpose(-1,-2)))/self.temperature
-        feature = torch.matmul(attention,v)
-        return {
-            "attention":attention,
-            "feature_vector": feature,
-        }
-    
-class Transformer_Block(nn.Module):
-    def __init__(self, embed_size,num_heads):
-        super(Transformer_Block, self).__init__()
-        
-        self.num_heads = num_heads
-        self.norm = nn.LayerNorm(embed_size)
-        self.attention = Attention(embed_size//num_heads)
-
-    def forward(self, x):
-        bs,n_1,embed_dim = x.shape
-        x = self.norm(x)
-        
-        x = x.view(bs,self.num_heads,n_1,embed_dim//self.num_heads)  ## B, head, 256, 192//head
-        x = self.attention(x)["feature_vector"]
+        x = torch.matmul(attention,v)
         x = x.view(bs,n_1,embed_dim)
-
         return x
     
+class Transformer_Block(nn.Module):
+    def __init__(self, num_heads,embed_size,hidden_dim,dropout):
+        super(Transformer_Block, self).__init__()
+        
+        self.norm = nn.LayerNorm(embed_size)
+        self.attn = Attention(num_heads, embed_size)
+        self.MLP = nn.Sequential(
+            nn.LayerNorm(embed_size),
+            nn.Linear(embed_size, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, embed_size),
+            nn.Dropout(dropout)
+        )
+    def forward(self,x):
+        x = self.norm(x)
+        x = self.attn(x) + x
+        x = self.MLP(x) + x
+        
+        return x
+        
 class Vision_Transformer(nn.Module):
     def __init__(self, image_size=256,in_channels=3, patch_size = 16, embed_size=192,hidden_dim=512, num_heads = 8,num_layers=4,dropout=0.01):
         super(Vision_Transformer, self).__init__()
@@ -71,20 +75,8 @@ class Vision_Transformer(nn.Module):
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.embed_size))
         self.pos_emb = nn.Parameter(torch.randn(1, self.num_patches + 1, self.embed_size))
 
-        self.layers = nn.ModuleList([])
-        self.feed_forward = nn.Sequential(
-            nn.LayerNorm(embed_size),
-            nn.Linear(embed_size, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_size),
-            nn.Dropout(dropout)
-        )
-        for _ in range(num_layers):
-            self.layers.append(nn.Sequential(
-                Transformer_Block(embed_size,num_heads),
-                self.feed_forward    
-            ))
+        self.layers = nn.Sequential(*[Transformer_Block(num_heads,embed_size,hidden_dim,dropout)
+                                      for i in range(num_layers)])
 
         self.clf_head = nn.Linear(embed_size,10)
 
